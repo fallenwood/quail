@@ -1,0 +1,11 @@
+pr: none
+
+trigger:
+  branches:
+    include:
+      - master
+
+extends:
+  template: template.yml
+  parameters:
+    pipelineType: 'Official'

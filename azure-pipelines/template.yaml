@@ -1,0 +1,31 @@
+variables:
+  tag: "$(Build.BuildNumber)"
+  tagArm: "$(Build.BuildNumber)-arm64"
+
+parameters:
+- name: pipelineType
+  displayName: "Pipeline Type"
+  type: string
+
+jobs:
+- job: Build
+  displayName: 'Docker Build'
+  pool:
+    vmImage: 'ubuntu-latest'
+
+  steps:
+  - checkout: self
+
+  - task: Docker@2
+    inputs:
+      containerRegistry: 'docker hub'
+      repository: 'fallenwood/quail'
+      ${{ if eq(parameters.pipelineType, 'Official') }}:
+        displayName: 'Docker Build And Push'
+        command: 'buildAndPush'
+      ${{ if ne(parameters.pipelineType, 'Official') }}:
+        displayName: 'Docker Build'
+        command: 'build'
+      Dockerfile: '**/Dockerfile.arm64'
+      tags: |
+        $(tagArm)
