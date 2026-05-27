@@ -1,4 +1,3 @@
-using Microsoft.EntityFrameworkCore;
 using MimeKit;
 using Quail.Data;
 using Quail.Models;
@@ -6,7 +5,7 @@ using ZLinq;
 
 namespace Quail.Services;
 
-public class EmailService(QuailDbContext db)
+public class EmailService(QuailDataStore dataStore)
 {
     /// <summary>
     /// Atomically allocates the next UID for a mailbox using a SQL UPDATE + RETURNING pattern.
@@ -14,35 +13,28 @@ public class EmailService(QuailDbContext db)
     /// </summary>
     public async Task<long> AllocateUidAsync(int mailboxId)
     {
-        // Atomic increment: UPDATE returns the pre-increment value
-        var result = await db.Database.SqlQuery<long>(
-            $"UPDATE Mailboxes SET NextUid = NextUid + 1 WHERE Id = {mailboxId} RETURNING NextUid - 1")
-            .ToListAsync();
-
-        return result.First();
+        return await dataStore.AllocateUidAsync(mailboxId);
     }
 
     public async Task<Message> StoreMessageAsync(string rawContent, int recipientUserId)
     {
         var message = ParseMessage(rawContent);
-        db.Messages.Add(message);
-        await db.SaveChangesAsync();
+        await dataStore.InsertMessageAsync(message);
 
         // Deliver to recipient's INBOX
-        var inbox = await db.Mailboxes.FirstOrDefaultAsync(
-            m => m.UserId == recipientUserId && m.SpecialUse == SpecialFolder.Inbox);
+        var inbox = await dataStore.GetMailboxBySpecialUseAsync(recipientUserId, SpecialFolder.Inbox);
 
         if (inbox is not null)
         {
             var uid = await AllocateUidAsync(inbox.Id);
-            db.MailboxMessages.Add(new MailboxMessage
+            var mailboxMessage = new MailboxMessage
             {
                 MailboxId = inbox.Id,
                 MessageId = message.Id,
                 Uid = uid,
                 InternalDate = message.InternalDate
-            });
-            await db.SaveChangesAsync();
+            };
+            await dataStore.InsertMailboxMessageAsync(mailboxMessage);
         }
 
         return message;
@@ -51,24 +43,22 @@ public class EmailService(QuailDbContext db)
     public async Task<Message> StoreToSentAsync(string rawContent, int senderUserId)
     {
         var message = ParseMessage(rawContent);
-        db.Messages.Add(message);
-        await db.SaveChangesAsync();
+        await dataStore.InsertMessageAsync(message);
 
-        var sent = await db.Mailboxes.FirstOrDefaultAsync(
-            m => m.UserId == senderUserId && m.SpecialUse == SpecialFolder.Sent);
+        var sent = await dataStore.GetMailboxBySpecialUseAsync(senderUserId, SpecialFolder.Sent);
 
         if (sent is not null)
         {
             var uid = await AllocateUidAsync(sent.Id);
-            db.MailboxMessages.Add(new MailboxMessage
+            var mailboxMessage = new MailboxMessage
             {
                 MailboxId = sent.Id,
                 MessageId = message.Id,
                 Uid = uid,
                 Flags = MessageFlags.Seen,
                 InternalDate = message.InternalDate
-            });
-            await db.SaveChangesAsync();
+            };
+            await dataStore.InsertMailboxMessageAsync(mailboxMessage);
         }
 
         return message;
@@ -77,13 +67,14 @@ public class EmailService(QuailDbContext db)
     public async Task<(Message message, MailboxMessage mailboxMessage)?> StoreToOutboxAsync(string rawContent, int senderUserId)
     {
         var message = ParseMessage(rawContent);
-        db.Messages.Add(message);
-        await db.SaveChangesAsync();
+        await dataStore.InsertMessageAsync(message);
 
-        var outbox = await db.Mailboxes.FirstOrDefaultAsync(
-            m => m.UserId == senderUserId && m.SpecialUse == SpecialFolder.Outbox);
+        var outbox = await dataStore.GetMailboxBySpecialUseAsync(senderUserId, SpecialFolder.Outbox);
 
-        if (outbox is null) return null;
+        if (outbox is null)
+        {
+            return null;
+        }
 
         var uid = await AllocateUidAsync(outbox.Id);
         var mm = new MailboxMessage
@@ -93,16 +84,14 @@ public class EmailService(QuailDbContext db)
             Uid = uid,
             InternalDate = message.InternalDate
         };
-        db.MailboxMessages.Add(mm);
-        await db.SaveChangesAsync();
+        await dataStore.InsertMailboxMessageAsync(mm);
 
         return (message, mm);
     }
 
     public async Task MoveToSentAsync(MailboxMessage mailboxMessage, int senderUserId)
     {
-        var sent = await db.Mailboxes.FirstOrDefaultAsync(
-            m => m.UserId == senderUserId && m.SpecialUse == SpecialFolder.Sent);
+        var sent = await dataStore.GetMailboxBySpecialUseAsync(senderUserId, SpecialFolder.Sent);
 
         if (sent is not null)
         {
@@ -110,7 +99,7 @@ public class EmailService(QuailDbContext db)
             mailboxMessage.MailboxId = sent.Id;
             mailboxMessage.Uid = uid;
             mailboxMessage.Flags = MessageFlags.Seen;
-            await db.SaveChangesAsync();
+            await dataStore.UpdateMailboxMessageAsync(mailboxMessage);
         }
     }
 
@@ -141,7 +130,7 @@ public class EmailService(QuailDbContext db)
 
     public async Task<User?> FindUserByEmailAsync(string email)
     {
-        return await db.Users.FirstOrDefaultAsync(u => u.Email == email);
+        return await dataStore.GetUserByEmailAsync(email);
     }
 
     private static string? GetJoinedAddressesOrNull(IEnumerable<MailboxAddress> mailboxes)

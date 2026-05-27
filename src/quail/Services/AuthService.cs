@@ -1,19 +1,20 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Quail.Data;
 using Quail.Models;
 
 namespace Quail.Services;
 
-public class AuthService(QuailDbContext db, IConfiguration config)
+public class AuthService(QuailDataStore dataStore, IConfiguration config)
 {
     public async Task<User?> RegisterAsync(string username, string email, string password)
     {
-        if (await db.Users.AnyAsync(u => u.Username == username || u.Email == email))
+        if (await dataStore.UserExistsAsync(username, email))
+        {
             return null;
+        }
 
         var user = new User
         {
@@ -22,8 +23,7 @@ public class AuthService(QuailDbContext db, IConfiguration config)
             PasswordHash = BCrypt.Net.BCrypt.HashPassword(password)
         };
 
-        db.Users.Add(user);
-        await db.SaveChangesAsync();
+        await dataStore.InsertUserAsync(user);
 
         // Create default mailboxes
         var mailboxes = new[]
@@ -36,8 +36,10 @@ public class AuthService(QuailDbContext db, IConfiguration config)
             new Mailbox { UserId = user.Id, Name = "Outbox", SpecialUse = SpecialFolder.Outbox },
         };
 
-        db.Mailboxes.AddRange(mailboxes);
-        await db.SaveChangesAsync();
+        foreach (var mailbox in mailboxes)
+        {
+            await dataStore.InsertMailboxAsync(mailbox);
+        }
 
         return user;
     }
@@ -53,7 +55,7 @@ public class AuthService(QuailDbContext db, IConfiguration config)
             return null;
         }
 
-        var user = await db.Users.FirstOrDefaultAsync(u => u.Username == login || u.Email == login);
+        var user = await dataStore.GetUserByLoginAsync(login);
 
         // Always verify against a hash to prevent timing-based user enumeration
         var hashToVerify = user?.PasswordHash ?? DummyHash;

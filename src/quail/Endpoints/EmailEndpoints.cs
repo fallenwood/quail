@@ -1,6 +1,5 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
 using MimeKit;
 using Quail.Data;
 using Quail.Models;
@@ -19,30 +18,20 @@ public static class EmailEndpoints
     {
         var group = app.MapGroup("/api/emails").RequireAuthorization();
 
-        group.MapGet("/", async (QuailDbContext db, ClaimsPrincipal principal, [FromQuery] int? mailboxId, [FromQuery] int page = 1, [FromQuery] int pageSize = 50) =>
+        group.MapGet("/", async (QuailDataStore dataStore, ClaimsPrincipal principal, [FromQuery] int? mailboxId, [FromQuery] int page = 1, [FromQuery] int pageSize = 50) =>
         {
             var userId = GetUserId(principal);
-            if (userId is null) return Results.Unauthorized();
+            if (userId is null)
+            {
+                return Results.Unauthorized();
+            }
 
             // Clamp pagination parameters
             page = Math.Max(1, page);
             pageSize = Math.Clamp(pageSize, 1, 100);
 
-            var query = db.MailboxMessages
-                .Include(mm => mm.Message)
-                .Include(mm => mm.Mailbox)
-                .Where(mm => mm.Mailbox.UserId == userId);
-
-            if (mailboxId.HasValue)
-                query = query.Where(mm => mm.MailboxId == mailboxId.Value);
-            else
-                query = query.Where(mm => mm.Mailbox.SpecialUse == SpecialFolder.Inbox);
-
-            var total = await query.CountAsync();
-            var messages = await query
-                .OrderByDescending(mm => mm.InternalDate)
-                .Skip((page - 1) * pageSize)
-                .Take(pageSize)
+            var result = await dataStore.GetEmailPageAsync(userId.Value, mailboxId, page, pageSize);
+            var messages = result.Items
                 .Select(mm => new EmailSummary(
                     mm.MessageId,
                     mm.Uid,
@@ -53,50 +42,72 @@ public static class EmailEndpoints
                     mm.InternalDate,
                     mm.Flags.HasFlag(MessageFlags.Seen),
                     mm.Flags.HasFlag(MessageFlags.Flagged)))
-                .ToListAsync();
+                .ToList();
 
-            return Results.Ok(new EmailListResponse(total, page, pageSize, messages));
+            return Results.Ok(new EmailListResponse(result.TotalCount, page, pageSize, messages));
         });
 
-        group.MapGet("/{id:int}", async (int id, QuailDbContext db, ClaimsPrincipal principal) =>
+        group.MapGet("/{id:int}", async (int id, QuailDataStore dataStore, ClaimsPrincipal principal) =>
         {
             var userId = GetUserId(principal);
-            if (userId is null) return Results.Unauthorized();
-            var mm = await db.MailboxMessages
-                .Include(m => m.Message)
-                .Include(m => m.Mailbox)
-                .FirstOrDefaultAsync(m => m.MessageId == id && m.Mailbox.UserId == userId);
+            if (userId is null)
+            {
+                return Results.Unauthorized();
+            }
 
-            if (mm is null) return Results.NotFound();
+            var mailboxMessage = await dataStore.GetMailboxMessageByMessageIdAsync(id, userId.Value);
+            if (mailboxMessage is null)
+            {
+                return Results.NotFound();
+            }
 
             // Mark as read
-            if (!mm.Flags.HasFlag(MessageFlags.Seen))
+            if (!mailboxMessage.Flags.HasFlag(MessageFlags.Seen))
             {
-                mm.Flags |= MessageFlags.Seen;
-                await db.SaveChangesAsync();
+                mailboxMessage.Flags |= MessageFlags.Seen;
+                await dataStore.UpdateMailboxMessageAsync(mailboxMessage);
             }
 
             return Results.Ok(new EmailDetail(
-                mm.MessageId, mm.Uid, mm.Message.FromAddress, mm.Message.ToAddress,
-                mm.Message.CcAddress, mm.Message.Subject, mm.Message.TextBody,
-                mm.Message.HtmlBody, mm.InternalDate, true));
+                mailboxMessage.MessageId,
+                mailboxMessage.Uid,
+                mailboxMessage.Message.FromAddress,
+                mailboxMessage.Message.ToAddress,
+                mailboxMessage.Message.CcAddress,
+                mailboxMessage.Message.Subject,
+                mailboxMessage.Message.TextBody,
+                mailboxMessage.Message.HtmlBody,
+                mailboxMessage.InternalDate,
+                true));
         });
 
-        group.MapPost("/", async (ComposeRequest req, QuailDbContext db, ClaimsPrincipal principal, EmailService emailService) =>
+        group.MapPost("/", async (ComposeRequest req, QuailDataStore dataStore, ClaimsPrincipal principal, EmailService emailService) =>
         {
             var userId = GetUserId(principal);
-            if (userId is null) return Results.Unauthorized();
+            if (userId is null)
+            {
+                return Results.Unauthorized();
+            }
 
-            var user = await db.Users.FindAsync(userId.Value);
-            if (user is null) return Results.Unauthorized();
+            var user = await dataStore.GetUserByIdAsync(userId.Value);
+            if (user is null)
+            {
+                return Results.Unauthorized();
+            }
 
             // Input length validation
             if (string.IsNullOrWhiteSpace(req.To))
+            {
                 return Results.BadRequest(new ErrorResponse("To field is required"));
+            }
             if (req.Subject.Length > 500)
+            {
                 return Results.BadRequest(new ErrorResponse("Subject too long (max 500 characters)"));
+            }
             if (req.Body.Length > 1_000_000)
+            {
                 return Results.BadRequest(new ErrorResponse("Body too long (max 1MB)"));
+            }
 
             // Parse all recipient addresses
             var toAddresses = req.To.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
@@ -111,13 +122,12 @@ public static class EmailEndpoints
 
             // Cap recipient count to prevent abuse
             if (allRecipients.Count > 50)
+            {
                 return Results.BadRequest(new ErrorResponse("Too many recipients (max 50)"));
+            }
 
             // Validate all recipients exist — single batched query
-            var recipientUsers = await db.Users
-                .Where(u => allRecipients.Contains(u.Email))
-                .ToListAsync();
-
+            var recipientUsers = await dataStore.GetUsersByEmailsAsync(allRecipients);
             var foundEmails = recipientUsers.Select(u => u.Email).ToHashSet(StringComparer.OrdinalIgnoreCase);
             var invalidAddresses = allRecipients.Where(a => !foundEmails.Contains(a)).ToList();
 
@@ -134,13 +144,19 @@ public static class EmailEndpoints
             try
             {
                 foreach (var to in toAddresses)
+                {
                     message.To.Add(MailboxAddress.Parse(to));
+                }
 
                 foreach (var cc in ccAddresses)
+                {
                     message.Cc.Add(MailboxAddress.Parse(cc));
+                }
 
                 foreach (var bcc in bccAddresses)
+                {
                     message.Bcc.Add(MailboxAddress.Parse(bcc));
+                }
             }
             catch (FormatException)
             {
@@ -166,7 +182,9 @@ public static class EmailEndpoints
             // Store in Outbox (sender's copy with Bcc)
             var outboxResult = await emailService.StoreToOutboxAsync(senderRawContent, userId.Value);
             if (outboxResult is null)
+            {
                 return Results.StatusCode(500);
+            }
 
             // Deliver to each recipient using batched user lookup results
             foreach (var recipient in recipientUsers)
@@ -180,108 +198,130 @@ public static class EmailEndpoints
             return Results.Ok(new MessageResponse("Sent"));
         }).RequireRateLimiting("send");
 
-        group.MapPut("/{id:int}/read", async (int id, QuailDbContext db, ClaimsPrincipal principal) =>
+        group.MapPut("/{id:int}/read", async (int id, QuailDataStore dataStore, ClaimsPrincipal principal) =>
         {
             var userId = GetUserId(principal);
-            if (userId is null) return Results.Unauthorized();
+            if (userId is null)
+            {
+                return Results.Unauthorized();
+            }
 
-            var mm = await db.MailboxMessages
-                .Include(m => m.Mailbox)
-                .FirstOrDefaultAsync(m => m.MessageId == id && m.Mailbox.UserId == userId);
+            var mailboxMessage = await dataStore.GetMailboxMessageByMessageIdAsync(id, userId.Value);
+            if (mailboxMessage is null)
+            {
+                return Results.NotFound();
+            }
 
-            if (mm is null) return Results.NotFound();
-            mm.Flags |= MessageFlags.Seen;
-            await db.SaveChangesAsync();
+            mailboxMessage.Flags |= MessageFlags.Seen;
+            await dataStore.UpdateMailboxMessageAsync(mailboxMessage);
             return Results.Ok();
         });
 
-        group.MapPut("/{id:int}/unread", async (int id, QuailDbContext db, ClaimsPrincipal principal) =>
+        group.MapPut("/{id:int}/unread", async (int id, QuailDataStore dataStore, ClaimsPrincipal principal) =>
         {
             var userId = GetUserId(principal);
-            if (userId is null) return Results.Unauthorized();
+            if (userId is null)
+            {
+                return Results.Unauthorized();
+            }
 
-            var mm = await db.MailboxMessages
-                .Include(m => m.Mailbox)
-                .FirstOrDefaultAsync(m => m.MessageId == id && m.Mailbox.UserId == userId);
+            var mailboxMessage = await dataStore.GetMailboxMessageByMessageIdAsync(id, userId.Value);
+            if (mailboxMessage is null)
+            {
+                return Results.NotFound();
+            }
 
-            if (mm is null) return Results.NotFound();
-            mm.Flags &= ~MessageFlags.Seen;
-            await db.SaveChangesAsync();
+            mailboxMessage.Flags &= ~MessageFlags.Seen;
+            await dataStore.UpdateMailboxMessageAsync(mailboxMessage);
             return Results.Ok();
         });
 
-        group.MapPut("/{id:int}/move", async (int id, MoveRequest req, QuailDbContext db, ClaimsPrincipal principal, EmailService emailService) =>
+        group.MapPut("/{id:int}/move", async (int id, MoveRequest req, QuailDataStore dataStore, ClaimsPrincipal principal, EmailService emailService) =>
         {
             var userId = GetUserId(principal);
-            if (userId is null) return Results.Unauthorized();
+            if (userId is null)
+            {
+                return Results.Unauthorized();
+            }
 
-            var mm = await db.MailboxMessages
-                .Include(m => m.Mailbox)
-                .FirstOrDefaultAsync(m => m.MessageId == id && m.Mailbox.UserId == userId);
+            var mailboxMessage = await dataStore.GetMailboxMessageByMessageIdAsync(id, userId.Value);
+            if (mailboxMessage is null)
+            {
+                return Results.NotFound();
+            }
 
-            if (mm is null) return Results.NotFound();
+            var targetMailbox = await dataStore.GetMailboxAsync(req.TargetMailboxId, userId.Value);
+            if (targetMailbox is null)
+            {
+                return Results.BadRequest(new ErrorResponse("Target mailbox not found"));
+            }
 
-            var targetMailbox = await db.Mailboxes.FirstOrDefaultAsync(
-                m => m.Id == req.TargetMailboxId && m.UserId == userId);
-            if (targetMailbox is null) return Results.BadRequest(new ErrorResponse("Target mailbox not found"));
-
-            mm.MailboxId = targetMailbox.Id;
-            mm.Uid = await emailService.AllocateUidAsync(targetMailbox.Id);
-            await db.SaveChangesAsync();
+            mailboxMessage.MailboxId = targetMailbox.Id;
+            mailboxMessage.Uid = await emailService.AllocateUidAsync(targetMailbox.Id);
+            await dataStore.UpdateMailboxMessageAsync(mailboxMessage);
             return Results.Ok();
         });
 
-        group.MapPut("/{id:int}/restore", async (int id, QuailDbContext db, ClaimsPrincipal principal, EmailService emailService) =>
+        group.MapPut("/{id:int}/restore", async (int id, QuailDataStore dataStore, ClaimsPrincipal principal, EmailService emailService) =>
         {
             var userId = GetUserId(principal);
-            if (userId is null) return Results.Unauthorized();
+            if (userId is null)
+            {
+                return Results.Unauthorized();
+            }
 
-            var mm = await db.MailboxMessages
-                .Include(m => m.Mailbox)
-                .FirstOrDefaultAsync(m => m.MessageId == id && m.Mailbox.UserId == userId);
+            var mailboxMessage = await dataStore.GetMailboxMessageByMessageIdAsync(id, userId.Value);
+            if (mailboxMessage is null)
+            {
+                return Results.NotFound();
+            }
 
-            if (mm is null) return Results.NotFound();
-
-            if (mm.Mailbox.SpecialUse != SpecialFolder.Trash)
+            if (mailboxMessage.Mailbox.SpecialUse != SpecialFolder.Trash)
+            {
                 return Results.BadRequest(new ErrorResponse("Email is not in Trash"));
+            }
 
-            var inbox = await db.Mailboxes.FirstOrDefaultAsync(
-                m => m.UserId == userId && m.SpecialUse == SpecialFolder.Inbox);
-            if (inbox is null) return Results.NotFound();
+            var inbox = await dataStore.GetMailboxBySpecialUseAsync(userId.Value, SpecialFolder.Inbox);
+            if (inbox is null)
+            {
+                return Results.NotFound();
+            }
 
-            mm.MailboxId = inbox.Id;
-            mm.Uid = await emailService.AllocateUidAsync(inbox.Id);
-            mm.Flags &= ~MessageFlags.Deleted;
-            await db.SaveChangesAsync();
+            mailboxMessage.MailboxId = inbox.Id;
+            mailboxMessage.Uid = await emailService.AllocateUidAsync(inbox.Id);
+            mailboxMessage.Flags &= ~MessageFlags.Deleted;
+            await dataStore.UpdateMailboxMessageAsync(mailboxMessage);
             return Results.Ok(new MessageResponse("Restored"));
         });
 
-        group.MapDelete("/{id:int}", async (int id, QuailDbContext db, ClaimsPrincipal principal, EmailService emailService) =>
+        group.MapDelete("/{id:int}", async (int id, QuailDataStore dataStore, ClaimsPrincipal principal, EmailService emailService) =>
         {
             var userId = GetUserId(principal);
-            if (userId is null) return Results.Unauthorized();
+            if (userId is null)
+            {
+                return Results.Unauthorized();
+            }
 
-            var mm = await db.MailboxMessages
-                .Include(m => m.Mailbox)
-                .FirstOrDefaultAsync(m => m.MessageId == id && m.Mailbox.UserId == userId);
-
-            if (mm is null) return Results.NotFound();
+            var mailboxMessage = await dataStore.GetMailboxMessageByMessageIdAsync(id, userId.Value);
+            if (mailboxMessage is null)
+            {
+                return Results.NotFound();
+            }
 
             // Move to trash or hard delete if already in trash
-            var trash = await db.Mailboxes.FirstOrDefaultAsync(
-                m => m.UserId == userId && m.SpecialUse == SpecialFolder.Trash);
+            var trash = await dataStore.GetMailboxBySpecialUseAsync(userId.Value, SpecialFolder.Trash);
 
-            if (mm.Mailbox.SpecialUse == SpecialFolder.Trash)
+            if (mailboxMessage.Mailbox.SpecialUse == SpecialFolder.Trash)
             {
-                db.MailboxMessages.Remove(mm);
+                await dataStore.DeleteMailboxMessageAsync(mailboxMessage.Id);
             }
             else if (trash is not null)
             {
-                mm.MailboxId = trash.Id;
-                mm.Uid = await emailService.AllocateUidAsync(trash.Id);
+                mailboxMessage.MailboxId = trash.Id;
+                mailboxMessage.Uid = await emailService.AllocateUidAsync(trash.Id);
+                await dataStore.UpdateMailboxMessageAsync(mailboxMessage);
             }
 
-            await db.SaveChangesAsync();
             return Results.Ok();
         });
 
