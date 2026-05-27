@@ -17,12 +17,12 @@ WORKDIR /src
 FROM prep AS build
 COPY . .
 
-WORKDIR "/src/quail.client"
+WORKDIR "/src/src/quail.client"
 RUN bun install && bun run build
 
 WORKDIR .
-RUN dotnet restore "src/quail.csproj"
-WORKDIR "/src/quail"
+RUN dotnet restore "src/src/quail.csproj"
+WORKDIR "/src/src/quail"
 RUN dotnet build "quail.csproj" -c Release -o /app/build
 
 FROM build as test
