@@ -1,6 +1,5 @@
 using System.Text;
 using Microsoft.AspNetCore.Connections;
-using Microsoft.EntityFrameworkCore;
 using Quail.Data;
 using Quail.Models;
 using ZLinq;
@@ -261,22 +260,16 @@ public class Pop3ConnectionHandler(IServiceProvider serviceProvider, ILogger<Pop
     private async Task<List<MailboxMessage>> GetInboxMessagesAsync(int userId)
     {
         using var scope = serviceProvider.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<QuailDbContext>();
-        return await db.MailboxMessages
-            .Include(mm => mm.Message)
-            .Include(mm => mm.Mailbox)
-            .Where(mm => mm.Mailbox.UserId == userId && mm.Mailbox.SpecialUse == SpecialFolder.Inbox)
-            .Where(mm => !mm.Flags.HasFlag(MessageFlags.Deleted))
-            .OrderBy(mm => mm.Uid)
-            .ToListAsync();
+        var dataStore = scope.ServiceProvider.GetRequiredService<QuailDataStore>();
+        return await dataStore.GetInboxMessagesAsync(userId);
     }
 
     private async Task CommitDeletionsAsync(List<MailboxMessage> messages, HashSet<long> deletedUids)
     {
         using var scope = serviceProvider.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<QuailDbContext>();
+        var dataStore = scope.ServiceProvider.GetRequiredService<QuailDataStore>();
         var toDelete = messages.AsValueEnumerable().Where(m => deletedUids.Contains(m.Uid)).Select(m => m.Id).ToList();
-        await db.MailboxMessages.Where(mm => toDelete.Contains(mm.Id)).ExecuteDeleteAsync();
+        await dataStore.DeleteMailboxMessagesAsync(toDelete);
     }
 
     private enum Pop3State

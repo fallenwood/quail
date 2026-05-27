@@ -5,7 +5,6 @@ using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.RateLimiting;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Quail;
 using Quail.Data;
@@ -25,8 +24,7 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 });
 
 // Database
-builder.Services.AddDbContext<QuailDbContext>(options =>
-    options.UseSqlite(builder.Configuration.GetConnectionString("DefaultConnection") ?? "Data Source=quail.db"));
+builder.Services.AddSingleton<QuailDataStore>();
 
 // Services
 builder.Services.AddScoped<AuthService>();
@@ -165,14 +163,11 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
-// Ensure database is created
+// Ensure database schema exists
 using (var scope = app.Services.CreateScope())
 {
-    var db = scope.ServiceProvider.GetRequiredService<QuailDbContext>();
-    // Enable WAL mode for better concurrency
-    await db.Database.ExecuteSqlRawAsync("PRAGMA journal_mode=WAL;");
-
-    await db.Database.MigrateAsync();
+    var dataStore = scope.ServiceProvider.GetRequiredService<QuailDataStore>();
+    await dataStore.InitializeAsync();
 
     // Seed configured admin user
     if (seedAdminOptions.Enabled)
@@ -185,8 +180,10 @@ using (var scope = app.Services.CreateScope())
         }
 
         var authService = scope.ServiceProvider.GetRequiredService<AuthService>();
-        if (!await db.Users.AnyAsync(u => u.Username == seedAdminOptions.Username || u.Email == seedAdminOptions.Email))
+        if (!await dataStore.UserExistsAsync(seedAdminOptions.Username, seedAdminOptions.Email))
+        {
             await authService.RegisterAsync(seedAdminOptions.Username, seedAdminOptions.Email, seedAdminOptions.Password);
+        }
     }
 }
 

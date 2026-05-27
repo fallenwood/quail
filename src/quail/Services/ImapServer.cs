@@ -1,6 +1,5 @@
 using System.Text;
 using Microsoft.AspNetCore.Connections;
-using Microsoft.EntityFrameworkCore;
 using Quail.Data;
 using Quail.Models;
 using ZLinq;
@@ -333,19 +332,24 @@ public class ImapConnectionHandler(IServiceProvider serviceProvider, ILogger<Ima
         var targets = ResolveRange(range, messages, useUid);
 
         using var scope = serviceProvider.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<QuailDbContext>();
+        var dataStore = scope.ServiceProvider.GetRequiredService<QuailDataStore>();
 
         foreach (var (seqNum, mm) in targets)
         {
             if (action.Contains("+FLAGS"))
+            {
                 mm.Flags |= flags;
+            }
             else if (action.Contains("-FLAGS"))
+            {
                 mm.Flags &= ~flags;
+            }
             else if (action.Contains("FLAGS"))
+            {
                 mm.Flags = flags;
+            }
 
-            db.Attach(mm);
-            db.Entry(mm).Property(x => x.Flags).IsModified = true;
+            await dataStore.UpdateMailboxMessageAsync(mm);
 
             if (!action.Contains(".SILENT"))
             {
@@ -354,7 +358,6 @@ public class ImapConnectionHandler(IServiceProvider serviceProvider, ILogger<Ima
                 await writer.WriteLineAsync($"* {seqNum} FETCH (FLAGS ({flagStr}){uidPart})");
             }
         }
-        await db.SaveChangesAsync();
         await writer.WriteLineAsync($"{tag} OK STORE completed");
     }
 
@@ -601,34 +604,29 @@ public class ImapConnectionHandler(IServiceProvider serviceProvider, ILogger<Ima
     private async Task<List<Mailbox>> GetMailboxesAsync(int userId)
     {
         using var scope = serviceProvider.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<QuailDbContext>();
-        return await db.Mailboxes.Where(m => m.UserId == userId).ToListAsync();
+        var dataStore = scope.ServiceProvider.GetRequiredService<QuailDataStore>();
+        return await dataStore.GetMailboxesAsync(userId);
     }
 
     private async Task<Mailbox?> GetMailboxByNameAsync(int userId, string name)
     {
         using var scope = serviceProvider.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<QuailDbContext>();
-        return await db.Mailboxes.FirstOrDefaultAsync(
-            m => m.UserId == userId && m.Name.ToUpper() == name.ToUpper());
+        var dataStore = scope.ServiceProvider.GetRequiredService<QuailDataStore>();
+        return await dataStore.GetMailboxByNameAsync(userId, name);
     }
 
     private async Task<List<MailboxMessage>> GetMailboxMessagesAsync(int mailboxId)
     {
         using var scope = serviceProvider.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<QuailDbContext>();
-        return await db.MailboxMessages
-            .Include(mm => mm.Message)
-            .Where(mm => mm.MailboxId == mailboxId)
-            .OrderBy(mm => mm.Uid)
-            .ToListAsync();
+        var dataStore = scope.ServiceProvider.GetRequiredService<QuailDataStore>();
+        return await dataStore.GetMailboxMessagesAsync(mailboxId);
     }
 
     private async Task ExpungeMessagesAsync(List<MailboxMessage> toDelete)
     {
         using var scope = serviceProvider.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<QuailDbContext>();
+        var dataStore = scope.ServiceProvider.GetRequiredService<QuailDataStore>();
         var ids = toDelete.AsValueEnumerable().Select(m => m.Id).ToList();
-        await db.MailboxMessages.Where(mm => ids.Contains(mm.Id)).ExecuteDeleteAsync();
+        await dataStore.DeleteMailboxMessagesAsync(ids);
     }
 }

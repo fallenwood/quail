@@ -1,5 +1,4 @@
 using System.Security.Claims;
-using Microsoft.EntityFrameworkCore;
 using Quail.Data;
 using Quail.Models;
 
@@ -13,58 +12,75 @@ public static class MailboxEndpoints
     {
         var group = app.MapGroup("/api/mailboxes").RequireAuthorization();
 
-        group.MapGet("/", async (QuailDbContext db, ClaimsPrincipal principal) =>
+        group.MapGet("/", async (QuailDataStore dataStore, ClaimsPrincipal principal) =>
         {
             var userId = GetUserId(principal);
-            if (userId is null) return Results.Unauthorized();
+            if (userId is null)
+            {
+                return Results.Unauthorized();
+            }
 
-            var mailboxes = await db.Mailboxes
-                .Where(m => m.UserId == userId)
+            var mailboxes = (await dataStore.GetMailboxStatsAsync(userId.Value))
                 .Select(m => new MailboxInfo(
                     m.Id,
                     m.Name,
-                    m.SpecialUse != null ? m.SpecialUse.ToString() : null,
-                    m.Messages.Count(mm => !mm.Flags.HasFlag(MessageFlags.Deleted)),
-                    m.Messages.Count(mm => !mm.Flags.HasFlag(MessageFlags.Seen) && !mm.Flags.HasFlag(MessageFlags.Deleted))))
-                .ToListAsync();
+                    m.SpecialUse?.ToString(),
+                    m.MessageCount,
+                    m.UnreadCount))
+                .ToList();
 
             return Results.Ok(mailboxes);
         });
 
-        group.MapPost("/", async (CreateMailboxRequest req, QuailDbContext db, ClaimsPrincipal principal) =>
+        group.MapPost("/", async (CreateMailboxRequest req, QuailDataStore dataStore, ClaimsPrincipal principal) =>
         {
             var userId = GetUserId(principal);
-            if (userId is null) return Results.Unauthorized();
+            if (userId is null)
+            {
+                return Results.Unauthorized();
+            }
 
             // Validate mailbox name
             var name = req.Name?.Trim() ?? "";
             if (name.Length == 0 || name.Length > 100)
+            {
                 return Results.BadRequest(new ErrorResponse("Mailbox name must be 1-100 characters"));
+            }
             if (name.Any(c => c is '/' or '\\' or '\0'))
+            {
                 return Results.BadRequest(new ErrorResponse("Mailbox name contains invalid characters"));
+            }
 
-            if (await db.Mailboxes.AnyAsync(m => m.UserId == userId && m.Name == name))
+            if (await dataStore.MailboxExistsAsync(userId.Value, name))
+            {
                 return Results.Conflict(new ErrorResponse("Mailbox already exists"));
+            }
 
             var mailbox = new Mailbox { UserId = userId.Value, Name = name };
-            db.Mailboxes.Add(mailbox);
-            await db.SaveChangesAsync();
+            await dataStore.InsertMailboxAsync(mailbox);
 
             return Results.Ok(new MailboxInfo(mailbox.Id, mailbox.Name, null, 0, 0));
         });
 
-        group.MapDelete("/{id:int}", async (int id, QuailDbContext db, ClaimsPrincipal principal) =>
+        group.MapDelete("/{id:int}", async (int id, QuailDataStore dataStore, ClaimsPrincipal principal) =>
         {
             var userId = GetUserId(principal);
-            if (userId is null) return Results.Unauthorized();
+            if (userId is null)
+            {
+                return Results.Unauthorized();
+            }
 
-            var mailbox = await db.Mailboxes.FirstOrDefaultAsync(m => m.Id == id && m.UserId == userId);
-            if (mailbox is null) return Results.NotFound();
+            var mailbox = await dataStore.GetMailboxAsync(id, userId.Value);
+            if (mailbox is null)
+            {
+                return Results.NotFound();
+            }
             if (mailbox.SpecialUse is not null)
+            {
                 return Results.BadRequest(new ErrorResponse("Cannot delete system mailboxes"));
+            }
 
-            db.Mailboxes.Remove(mailbox);
-            await db.SaveChangesAsync();
+            await dataStore.DeleteMailboxAsync(mailbox.Id);
             return Results.Ok();
         });
 
