@@ -126,17 +126,6 @@ public static class EmailEndpoints
                 return Results.BadRequest(new ErrorResponse("Too many recipients (max 50)"));
             }
 
-            // Validate all recipients exist — single batched query
-            var recipientUsers = await dataStore.GetUsersByEmailsAsync(allRecipients);
-            var foundEmails = recipientUsers.Select(u => u.Email).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var invalidAddresses = allRecipients.Where(a => !foundEmails.Contains(a)).ToList();
-
-            if (invalidAddresses.Count > 0)
-            {
-                var addressList = string.Join(", ", invalidAddresses);
-                return Results.BadRequest(new ErrorResponse($"Recipient(s) not found: {addressList}"));
-            }
-
             // Build MIME message (with Bcc for sender's copy)
             var message = new MimeMessage();
             message.From.Add(new MailboxAddress(user.Username, user.Email));
