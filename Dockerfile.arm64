@@ -17,8 +17,6 @@ WORKDIR /src
 FROM prep AS build
 COPY . .
 
-FROM mcr.microsoft.com/dotnet/sdk:10.0-azurelinux3.0-arm64v8 AS provider
-
 WORKDIR "/src/quail.client"
 RUN bun install && bun run build
 
@@ -37,6 +35,8 @@ RUN rm /app/publish/*.dbg
 FROM base AS final
 WORKDIR /app
 COPY --from=publish /app/publish .
+
+FROM mcr.microsoft.com/dotnet/sdk:10.0-azurelinux3.0-arm64v8 AS provider
 
 # Copy openssl libraries
 COPY --from=provider /usr/lib/libssl.so.3 /usr/lib/libssl.so.3
