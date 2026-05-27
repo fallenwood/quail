@@ -1,0 +1,51 @@
+FROM mcr.microsoft.com/azurelinux/distroless/base:3.0.20250602-arm64 AS base
+WORKDIR /app
+USER root
+EXPOSE 80
+
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS prep
+RUN apt-get update -yq \
+  && apt-get install curl gnupg unzip xz-utils llvm -yq \
+  && curl -fsSL https://bun.sh/install | bash \
+  && ln -s /root/.bun/bin/bun /usr/local/bin/bun
+RUN curl https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz -O && \
+  tar xf zig-x86_64-linux-0.16.0.tar.xz && \
+  mv zig-x86_64-linux-0.16.0 /usr/local && \
+  ln -s /usr/local/zig-x86_64-linux-0.16.0/zig /usr/local/bin/zig
+WORKDIR /src
+
+FROM prep AS build
+COPY . .
+
+FROM mcr.microsoft.com/dotnet/sdk:10.0-azurelinux3.0-arm64v8 AS provider
+
+WORKDIR "/src/quail.client"
+RUN bun install && bun run build
+
+WORKDIR .
+RUN dotnet restore "src/quail.csproj"
+WORKDIR "/src/quail"
+RUN dotnet build "quail.csproj" -c Release -o /app/build
+
+FROM build as test
+RUN dotnet test
+
+FROM build AS publish
+RUN dotnet publish "quail.csproj" -c Release -r linux-arm64 -o /app/publish /p:UseAppHost=false /p:PublishAot=true --verbosity D
+RUN rm /app/publish/*.dbg
+
+FROM base AS final
+WORKDIR /app
+COPY --from=publish /app/publish .
+
+# Copy openssl libraries
+COPY --from=provider /usr/lib/libssl.so.3 /usr/lib/libssl.so.3
+COPY --from=provider /usr/lib/libcrypto.so.3 /usr/lib/libcrypto.so.3
+
+COPY --from=provider /usr/lib/libstdc++.so.6 /usr/lib/libstdc++.so.6
+
+ENV ASPNETCORE_URLS=http://+:80
+ENV ASPNETCORE_ENVIRONMENT=Production
+
+ENTRYPOINT ["./quail"]
+
