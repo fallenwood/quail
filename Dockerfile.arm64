@@ -20,9 +20,8 @@ COPY . .
 WORKDIR "/src/src/quail.client"
 RUN bun install && bun run build
 
-WORKDIR .
-RUN dotnet restore "src/src/quail.csproj"
 WORKDIR "/src/src/quail"
+RUN dotnet restore "quail.csproj"
 RUN dotnet build "quail.csproj" -c Release -o /app/build
 
 FROM build as test
